@@ -101,7 +101,7 @@ func (v *V) ValueType() ValueType {
 //
 // V 是 jsonvalue 的主类型，表示一个 JSON 值。
 type V struct {
-	keyType   uint
+	keyType   uint // 0 string 1 uint64
 	valueType ValueType
 
 	srcByte   []byte
@@ -135,16 +135,11 @@ type children struct {
 }
 
 func (v *V) SetKeyType(t uint) {
-	if v.IsObject() {
-		v.keyType = t
-	}
+	v.keyType = t
 }
 
 func (v *V) GetKeyType() uint {
-	if v.IsObject() {
-		return v.keyType
-	}
-	return 0
+	return v.keyType
 }
 
 func new(t ValueType) *V {
