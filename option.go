@@ -1,16 +1,10 @@
 package jsonvalue
 
-import (
-	"bytes"
-)
+import "github.com/Andrew-M-C/go.jsonvalue/internal/buffer"
 
 const (
 	initialArrayCapacity = 32
 	asciiSize            = 128
-)
-
-var (
-	defaultMarshalOption = emptyOptions()
 )
 
 // Deprecated: Opt is the option of jsonvalue in marshaling. This type is deprecated,
@@ -106,10 +100,10 @@ type Opt struct {
 	FloatInfToFloat float64
 
 	// unicodeEscapingFunc defines how to escaping a unicode greater than 0x7F to buffer.
-	unicodeEscapingFunc func(r rune, buf *bytes.Buffer)
+	unicodeEscapingFunc func(r rune, buf buffer.Buffer)
 
 	// asciiCharEscapingFunc defines how to marshal bytes lower than 0x80.
-	asciiCharEscapingFunc [asciiSize]func(b byte, buf *bytes.Buffer)
+	asciiCharEscapingFunc [asciiSize]func(b byte, buf buffer.Buffer)
 
 	// escProperties
 	escProperties escapingProperties
@@ -201,14 +195,14 @@ func (o Opt) mergeTo(tgt *Opt) {
 func SetDefaultMarshalOptions(opts ...Option) {
 	opt := emptyOptions()
 	opt.combineOptionsFrom(opts)
-	defaultMarshalOption = opt
+	internal.defaultMarshalOption = opt
 }
 
 // ResetDefaultMarshalOptions reset default marshaling options to system default.
 //
 // ResetDefaultMarshalOptions 重设序列化时的默认选项为系统最原始的版本。
 func ResetDefaultMarshalOptions() {
-	defaultMarshalOption = emptyOptions()
+	internal.defaultMarshalOption = emptyOptions()
 }
 
 func emptyOptions() *Opt {
@@ -216,8 +210,7 @@ func emptyOptions() *Opt {
 }
 
 func getDefaultOptions() *Opt {
-	res := Opt{}
-	res = *defaultMarshalOption
+	res := *internal.defaultMarshalOption
 	return &res
 }
 
@@ -323,7 +316,8 @@ func (o *optMarshalKeySequence) mergeTo(opt *Opt) {
 
 // OptSetSequence tells that when marshaling an object, the key will be sorted by
 // the time they are added into or refreshed in its parent object. The later a key
-//  is set or updated, the later it and its value will be marshaled.
+//
+//	is set or updated, the later it and its value will be marshaled.
 //
 // OptSetSequence 指定在序列化 object 时，按照一个 key 被设置时的顺序进行序列化。如果一个
 // key 越晚添加到 object 类型，则在序列化的时候越靠后。
@@ -364,16 +358,12 @@ func (o *optFloatNaNConvertToFloat) mergeTo(opt *Opt) {
 //
 // OptFloatNaNToNull 表示当遇到 NaN 时，将值替换成 null
 func OptFloatNaNToNull() Option {
-	return globalOptFloatNaNNull
+	return optFloatNaNNull{}
 }
 
 type optFloatNaNNull struct{}
 
-var (
-	globalOptFloatNaNNull = &optFloatNaNNull{}
-)
-
-func (o *optFloatNaNNull) mergeTo(opt *Opt) {
+func (optFloatNaNNull) mergeTo(opt *Opt) {
 	opt.FloatNaNHandleType = FloatNaNNull
 }
 
@@ -427,16 +417,12 @@ func (o *optFloatInfConvertToFloat) mergeTo(opt *Opt) {
 //
 // OptFloatInfToNull 表示当遇到 +/-Inf 时，将值替换成 null
 func OptFloatInfToNull() Option {
-	return globalOptFloatInfNull
+	return optFloatInfNull{}
 }
 
 type optFloatInfNull struct{}
 
-var (
-	globalOptFloatInfNull = &optFloatInfNull{}
-)
-
-func (o *optFloatInfNull) mergeTo(opt *Opt) {
+func (optFloatInfNull) mergeTo(opt *Opt) {
 	opt.FloatInfHandleType = FloatInfNull
 }
 
@@ -513,7 +499,8 @@ func (o optUTF8) mergeTo(opt *Opt) {
 // should be escaped as '\/'. But non-escaping will not affect anything. If not specfied, slash will be
 // escaped by default.
 //
-//  OptEscapeSlash 指定是否需要转移斜杠 (/) 符号。在 JSON 标准中这个符号是需要被转移为 '\/' 的,
+//	OptEscapeSlash 指定是否需要转移斜杠 (/) 符号。在 JSON 标准中这个符号是需要被转移为 '\/' 的,
+//
 // 但是不转义这个符号也不会带来什么问题。如无明确指定，如无指定，默认情况下，斜杠是会被转义的。
 func OptEscapeSlash(on bool) Option {
 	return optEscSlash(on)
@@ -593,8 +580,8 @@ func (o *Opt) parseEscapingFuncs() {
 	// ASCII characters always to be escaped
 	o.asciiCharEscapingFunc['"'] = escDoubleQuote
 	o.asciiCharEscapingFunc['/'] = escSlash
-	o.asciiCharEscapingFunc['\\'] = escBaskslash
-	o.asciiCharEscapingFunc['\b'] = escBaskspace
+	o.asciiCharEscapingFunc['\\'] = escBackslash
+	o.asciiCharEscapingFunc['\b'] = escBackspace
 	o.asciiCharEscapingFunc['\f'] = escVertTab
 	o.asciiCharEscapingFunc['\t'] = escTab
 	o.asciiCharEscapingFunc['\n'] = escNewLine

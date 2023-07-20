@@ -1,9 +1,10 @@
 package jsonvalue
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
+
+	"github.com/Andrew-M-C/go.jsonvalue/internal/buffer"
 )
 
 func formatBool(b bool) string {
@@ -17,9 +18,9 @@ func formatBool(b bool) string {
 // - [UTF-16](https://zh.wikipedia.org/zh-cn/UTF-16)
 // - [JavaScript has a Unicode problem](https://mathiasbynens.be/notes/javascript-unicode)
 // - [Meaning of escaped unicode characters in JSON](https://stackoverflow.com/questions/21995410/meaning-of-escaped-unicode-characters-in-json)
-func escapeGreaterUnicodeToBuffByUTF16(r rune, buf *bytes.Buffer) {
+func escapeGreaterUnicodeToBuffByUTF16(r rune, buf buffer.Buffer) {
 	if r <= '\uffff' {
-		buf.WriteString(fmt.Sprintf("\\u%04X", r))
+		_, _ = buf.WriteString(fmt.Sprintf("\\u%04X", r))
 		return
 	}
 	// if r > 0x10FFFF {
@@ -31,11 +32,11 @@ func escapeGreaterUnicodeToBuffByUTF16(r rune, buf *bytes.Buffer) {
 	r = r - 0x10000
 	lo := r & 0x003FF
 	hi := (r & 0xFFC00) >> 10
-	buf.WriteString(fmt.Sprintf("\\u%04X", hi+0xD800))
-	buf.WriteString(fmt.Sprintf("\\u%04X", lo+0xDC00))
+	_, _ = buf.WriteString(fmt.Sprintf("\\u%04X", hi+0xD800))
+	_, _ = buf.WriteString(fmt.Sprintf("\\u%04X", lo+0xDC00))
 }
 
-func escapeGreaterUnicodeToBuffByUTF8(r rune, buf *bytes.Buffer) {
+func escapeGreaterUnicodeToBuffByUTF8(r rune, buf buffer.Buffer) {
 	// Comments below are copied from encoding/json:
 	//
 	// U+2028 is LINE SEPARATOR.
@@ -48,80 +49,80 @@ func escapeGreaterUnicodeToBuffByUTF8(r rune, buf *bytes.Buffer) {
 	if r == '\u2028' || r == '\u2029' {
 		escapeGreaterUnicodeToBuffByUTF16(r, buf)
 	} else {
-		buf.WriteRune(r)
+		_, _ = buf.WriteRune(r)
 	}
 }
 
-func escapeNothing(b byte, buf *bytes.Buffer) {
-	buf.WriteByte(b)
+func escapeNothing(b byte, buf buffer.Buffer) {
+	_ = buf.WriteByte(b)
 }
 
-func escAsciiControlChar(b byte, buf *bytes.Buffer) {
+func escAsciiControlChar(b byte, buf buffer.Buffer) {
 	upper := b >> 4
 	lower := b & 0x0F
 
 	writeChar := func(c byte) {
 		if c < 0xA {
-			buf.WriteByte('0' + c)
+			_ = buf.WriteByte('0' + c)
 		} else {
-			buf.WriteByte('A' + (c - 0xA))
+			_ = buf.WriteByte('A' + (c - 0xA))
 		}
 	}
 
-	buf.Write([]byte{'\\', 'u', '0', '0'})
+	_, _ = buf.Write([]byte{'\\', 'u', '0', '0'})
 	writeChar(upper)
 	writeChar(lower)
 }
 
-func escDoubleQuote(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', '"'})
+func escDoubleQuote(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', '"'})
 }
 
-func escSlash(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', '/'})
+func escSlash(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', '/'})
 }
 
-func escBaskslash(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', '\\'})
+func escBackslash(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', '\\'})
 }
 
-func escBaskspace(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'b'})
+func escBackspace(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'b'})
 }
 
-func escVertTab(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'f'})
+func escVertTab(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'f'})
 }
 
-func escTab(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 't'})
+func escTab(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 't'})
 }
 
-func escNewLine(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'n'})
+func escNewLine(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'n'})
 }
 
-func escReturn(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'r'})
+func escReturn(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'r'})
 }
 
-func escLeftAngle(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'u', '0', '0', '3', 'C'})
+func escLeftAngle(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'u', '0', '0', '3', 'C'})
 }
 
-func escRightAngle(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'u', '0', '0', '3', 'E'})
+func escRightAngle(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'u', '0', '0', '3', 'E'})
 }
 
-func escAnd(_ byte, buf *bytes.Buffer) {
-	buf.Write([]byte{'\\', 'u', '0', '0', '2', '6'})
+func escAnd(_ byte, buf buffer.Buffer) {
+	_, _ = buf.Write([]byte{'\\', 'u', '0', '0', '2', '6'})
 }
 
-// func escPercent(_ byte, buf *bytes.Buffer) {
+// func escPercent(_ byte, buf buffer.Buffer) {
 // 	buf.Write([]byte{'\\', 'u', '0', '0', '2', '5'})
 // }
 
-func escapeStringToBuff(s string, buf *bytes.Buffer, opt *Opt) {
+func escapeStringToBuff(s string, buf buffer.Buffer, opt *Opt) {
 	for _, r := range s {
 		if r <= 0x7F {
 			b := byte(r)

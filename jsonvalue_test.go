@@ -72,8 +72,10 @@ func TestJsonvalue(t *testing.T) {
 	test(t, "test marshaling", testMarshal)
 	test(t, "test sort", testSort)
 	test(t, "test insert, append, delete", testInsertAppendDelete)
-	test(t, "test structconv", testStructConv)
+	test(t, "test import/export", testImportExport)
 	test(t, "test Equal functions", testEqual)
+	test(t, "test marshaler and unmarshaler", testMarshalerUnmarshaler)
+	test(t, "test internal variables", testInternal)
 }
 
 func testBasicFunction(t *testing.T) {
@@ -238,6 +240,29 @@ func testMiscCharacters(t *testing.T) {
 		so(err, isErr)
 		so(v.ValueType(), eq, NotExist)
 	})
+
+	cv("unmarshal illegal plus symbols", func() {
+		okCases := []string{
+			`{"number":1}`,
+			`{"number":1E+1}`,
+		}
+		failCases := []string{
+			`{"number":+1}`,
+			`{"number":1+1}`,
+			`{"number":1E1+1}`,
+			`{"number":1E1+}`,
+		}
+
+		for _, c := range okCases {
+			v, err := UnmarshalString(c)
+			so(err, isNil)
+			so(v.MustGet("number").ValueType(), eq, Number)
+		}
+		for _, c := range failCases {
+			_, err := UnmarshalString(c)
+			so(err, isErr)
+		}
+	})
 }
 
 func testMustUnmarshalErrors(t *testing.T) {
@@ -279,7 +304,7 @@ func testUTF16(t *testing.T) {
 	)
 
 	v := NewObject()
-	v.SetString(orig).At("string")
+	v.MustSetString(orig).At("string")
 
 	data := struct {
 		String string `json:"string"`
@@ -348,14 +373,14 @@ func testUnmarshalWithIter(t *testing.T) {
 		raw := []byte("hello, 世界")
 		rawWithQuote := []byte(fmt.Sprintf("\"%s\"", raw))
 
-		v, err := unmarshalWithIter(iter(rawWithQuote), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(rawWithQuote), 0)
 		so(err, isNil)
 		so(v.String(), eq, string(raw))
 	})
 
 	cv("true", func() {
 		raw := []byte("  true  ")
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.Bool(), isTrue)
 		so(v.IsBoolean(), isTrue)
@@ -363,7 +388,7 @@ func testUnmarshalWithIter(t *testing.T) {
 
 	cv("false", func() {
 		raw := []byte("  false  ")
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.Bool(), isFalse)
 		so(v.IsBoolean(), isTrue)
@@ -371,21 +396,21 @@ func testUnmarshalWithIter(t *testing.T) {
 
 	cv("null", func() {
 		raw := []byte("\r\t\n  null \r\t\b  ")
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.IsNull(), isTrue)
 	})
 
 	cv("int number", func() {
 		raw := []byte(" 1234567890 ")
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.Int64(), eq, 1234567890)
 	})
 
 	cv("array with basic type", func() {
 		raw := []byte(" [123, true, false, null, [\"array in array\"], \"Hello, world!\" ] ")
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.IsArray(), isTrue)
 
@@ -396,7 +421,7 @@ func testUnmarshalWithIter(t *testing.T) {
 		raw := []byte(`  {"message": "Hello, world!"}	`)
 		printBytes(t, raw)
 
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.IsObject(), isTrue)
 
@@ -418,7 +443,7 @@ func testUnmarshalWithIter(t *testing.T) {
 		raw := []byte(` {"arr": [1234, true , null, false, {"obj":"empty object"}]}  `)
 		printBytes(t, raw)
 
-		v, err := unmarshalWithIter(iter(raw), 0)
+		v, err := unmarshalWithIter(globalPool{}, iter(raw), 0)
 		so(err, isNil)
 		so(v.IsObject(), isTrue)
 

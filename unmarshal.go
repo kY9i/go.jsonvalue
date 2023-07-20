@@ -4,7 +4,374 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+
+	"github.com/Andrew-M-C/go.jsonvalue/internal/unsafe"
 )
+
+// ================ OUTER UNMARSHAL ================
+
+// unmarshalWithIter parse bytes with unknown value type.
+func unmarshalWithIter(p pool, it iter, offset int) (v *V, err error) {
+	end := len(it)
+	offset, reachEnd := it.skipBlanks(offset)
+	if reachEnd {
+		return &V{}, fmt.Errorf("%w, cannot find any symbol characters found", ErrRawBytesUnrecignized)
+	}
+
+	chr := it[offset]
+	switch chr {
+	case '{':
+		v, offset, err = unmarshalObjectWithIterUnknownEnd(p, it, offset, end)
+
+	case '[':
+		v, offset, err = unmarshalArrayWithIterUnknownEnd(p, it, offset, end)
+
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
+		var n *V
+		n, offset, _, err = it.parseNumber(p, offset)
+		if err == nil {
+			v = n
+		}
+
+	case '"':
+		var sectLenWithoutQuote int
+		var sectEnd int
+		sectLenWithoutQuote, sectEnd, err = it.parseStrFromBytesForwardWithQuote(offset)
+		if err == nil {
+			v, err = NewString(unsafe.BtoS(it[offset+1:offset+1+sectLenWithoutQuote])), nil
+			offset = sectEnd
+		}
+
+	case 't':
+		offset, err = it.parseTrue(offset)
+		if err == nil {
+			v = NewBool(true)
+		}
+
+	case 'f':
+		offset, err = it.parseFalse(offset)
+		if err == nil {
+			v = NewBool(false)
+		}
+
+	case 'n':
+		offset, err = it.parseNull(offset)
+		if err == nil {
+			v = NewNull()
+		}
+
+	default:
+		return &V{}, fmt.Errorf("%w, invalid character \\u%04X at Position %d", ErrRawBytesUnrecignized, chr, offset)
+	}
+
+	if err != nil {
+		return &V{}, err
+	}
+
+	if offset, reachEnd = it.skipBlanks(offset, end); !reachEnd {
+		return &V{}, fmt.Errorf("%w, unnecessary trailing data remains at Position %d", ErrRawBytesUnrecignized, offset)
+	}
+
+	return v, nil
+}
+
+// unmarshalArrayWithIterUnknownEnd is similar with unmarshalArrayWithIter, though should start with '[',
+// but it does not known where its ']' is
+func unmarshalArrayWithIterUnknownEnd(p pool, it iter, offset, right int) (_ *V, end int, err error) {
+	offset++
+	arr := newArray(p)
+
+	reachEnd := false
+
+	for offset < right {
+		// search for ending ']'
+		offset, reachEnd = it.skipBlanks(offset, right)
+		if reachEnd {
+			// ']' not found
+			return nil, -1, fmt.Errorf("%w, cannot find ']'", ErrNotArrayValue)
+		}
+
+		chr := it[offset]
+		switch chr {
+		case ']':
+			return arr, offset + 1, nil
+
+		case ',':
+			offset++
+
+		case '{':
+			v, sectEnd, err := unmarshalObjectWithIterUnknownEnd(p, it, offset, right)
+			if err != nil {
+				return nil, -1, err
+			}
+			arr.appendToArr(v)
+			offset = sectEnd
+
+		case '[':
+			v, sectEnd, err := unmarshalArrayWithIterUnknownEnd(p, it, offset, right)
+			if err != nil {
+				return nil, -1, err
+			}
+			arr.appendToArr(v)
+			offset = sectEnd
+
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
+			var v *V
+			v, sectEnd, _, err := it.parseNumber(p, offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			arr.appendToArr(v)
+			offset = sectEnd
+
+		case '"':
+			sectLenWithoutQuote, sectEnd, err := it.parseStrFromBytesForwardWithQuote(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			v := NewString(unsafe.BtoS(it[offset+1 : offset+1+sectLenWithoutQuote]))
+			arr.appendToArr(v)
+			offset = sectEnd
+
+		case 't':
+			sectEnd, err := it.parseTrue(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			arr.appendToArr(NewBool(true))
+			offset = sectEnd
+
+		case 'f':
+			sectEnd, err := it.parseFalse(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			arr.appendToArr(NewBool(false))
+			offset = sectEnd
+
+		case 'n':
+			sectEnd, err := it.parseNull(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			arr.appendToArr(NewNull())
+			offset = sectEnd
+
+		default:
+			return nil, -1, fmt.Errorf("%w, invalid character \\u%04X at Position %d", ErrRawBytesUnrecignized, chr, offset)
+		}
+	}
+
+	return nil, -1, fmt.Errorf("%w, cannot find ']'", ErrNotArrayValue)
+}
+
+func (v *V) appendToArr(child *V) {
+	if v.children.arr == nil {
+		v.children.arr = make([]*V, 0, initialArrayCapacity)
+	}
+	v.children.arr = append(v.children.arr, child)
+}
+
+// unmarshalObjectWithIterUnknownEnd unmarshal object from raw bytes. it[offset] must be '{'
+func unmarshalObjectWithIterUnknownEnd(p pool, it iter, offset, right int) (_ *V, end int, err error) {
+	offset++
+	obj := newObject(p)
+
+	keyStart, keyEnd := 0, 0
+	colonFound := false
+
+	reachEnd := false
+
+	keyNotFoundErr := func() error {
+		if keyEnd == 0 {
+			return fmt.Errorf(
+				"%w, missing key for another value at Position %d", ErrNotObjectValue, offset,
+			)
+		}
+		if !colonFound {
+			return fmt.Errorf(
+				"%w, missing colon for key at Position %d", ErrNotObjectValue, offset,
+			)
+		}
+		return nil
+	}
+
+	valNotFoundErr := func() error {
+		if keyEnd > 0 {
+			return fmt.Errorf(
+				"%w, missing value for key '%s' at Position %d",
+				ErrNotObjectValue, unsafe.BtoS(it[keyStart:keyEnd]), keyStart,
+			)
+		}
+		return nil
+	}
+
+	for offset < right {
+		offset, reachEnd = it.skipBlanks(offset, right)
+		if reachEnd {
+			// '}' not found
+			return nil, -1, fmt.Errorf("%w, cannot find '}'", ErrNotObjectValue)
+		}
+
+		chr := it[offset]
+		switch chr {
+		case '}':
+			if err = valNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			return obj, offset + 1, nil
+
+		case ',':
+			if err = valNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			offset++
+			// continue
+
+		case ':':
+			if colonFound {
+				return nil, -1, fmt.Errorf("%w, duplicate colon at Position %d", ErrNotObjectValue, keyStart)
+			}
+			colonFound = true
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			offset++
+			// continue
+
+		case '{':
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			v, sectEnd, err := unmarshalObjectWithIterUnknownEnd(p, it, offset, right)
+			if err != nil {
+				return nil, -1, err
+			}
+			obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), v)
+			keyEnd, colonFound = 0, false
+			offset = sectEnd
+
+		case '[':
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			v, sectEnd, err := unmarshalArrayWithIterUnknownEnd(p, it, offset, right)
+			if err != nil {
+				return nil, -1, err
+			}
+			obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), v)
+			keyEnd, colonFound = 0, false
+			offset = sectEnd
+
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			var v *V
+			v, sectEnd, _, err := it.parseNumber(p, offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), v)
+			keyEnd, colonFound = 0, false
+			offset = sectEnd
+
+		case '"':
+			if keyEnd > 0 {
+				// string value
+				if !colonFound {
+					return nil, -1, fmt.Errorf("%w, missing value for key '%s' at Position %d",
+						ErrNotObjectValue, unsafe.BtoS(it[keyStart:keyEnd]), keyStart,
+					)
+				}
+				sectLenWithoutQuote, sectEnd, err := it.parseStrFromBytesForwardWithQuote(offset)
+				if err != nil {
+					return nil, -1, err
+				}
+				v := NewString(unsafe.BtoS(it[offset+1 : offset+1+sectLenWithoutQuote]))
+				obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), v)
+				keyEnd, colonFound = 0, false
+				offset = sectEnd
+
+			} else {
+				// string key
+				sectLenWithoutQuote, sectEnd, err := it.parseStrFromBytesForwardWithQuote(offset)
+				if err != nil {
+					return nil, -1, err
+				}
+				keyStart, keyEnd = offset+1, offset+1+sectLenWithoutQuote
+				offset = sectEnd
+			}
+
+		case 't':
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			sectEnd, err := it.parseTrue(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), NewBool(true))
+			keyEnd, colonFound = 0, false
+			offset = sectEnd
+
+		case 'f':
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			sectEnd, err := it.parseFalse(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), NewBool(false))
+			keyEnd, colonFound = 0, false
+			offset = sectEnd
+
+		case 'n':
+			if err = keyNotFoundErr(); err != nil {
+				return nil, -1, err
+			}
+			sectEnd, err := it.parseNull(offset)
+			if err != nil {
+				return nil, -1, err
+			}
+			obj.setToObjectChildren(unsafe.BtoS(it[keyStart:keyEnd]), NewNull())
+			keyEnd, colonFound = 0, false
+			offset = sectEnd
+
+		default:
+			return nil, -1, fmt.Errorf("%w, invalid character \\u%04X at Position %d", ErrRawBytesUnrecignized, chr, offset)
+		}
+
+	}
+
+	return nil, -1, fmt.Errorf("%w, cannot find '}'", ErrNotObjectValue)
+}
+
+// parseNumber parse a number string. Reference:
+//
+// - [ECMA-404 The JSON Data Interchange Standard](https://www.json.org/json-en.html)
+func (v *V) parseNumber(p pool) (err error) {
+	it := iter(v.srcByte)
+
+	parsed, end, reachEnd, err := it.parseNumber(p, 0)
+	if err != nil {
+		return err
+	}
+	if !reachEnd {
+		return fmt.Errorf("invalid character: 0x%02x", v.srcByte[end])
+	}
+
+	*v = *parsed
+	return nil
+}
+
+// ==== simple object parsing ====
+func newFromNumber(p pool, b []byte) (ret *V, err error) {
+	v := new(p, Number)
+	v.srcByte = b
+	return v, nil
+}
 
 // ================ GENERAL UNMARSHALING ================
 
@@ -311,7 +678,7 @@ func (it iter) skipBlanks(offset int, endPos ...int) (newOffset int, reachEnd bo
 // For state machine chart, please refer to ./img/parse_float_state_chart.drawio
 
 func (it iter) parseNumber(
-	offset int,
+	p pool, offset int,
 ) (v *V, end int, reachEnd bool, err error) {
 
 	idx := offset
@@ -366,6 +733,10 @@ func (it iter) parseNumber(
 			floated = true
 
 		case '+':
+			if !exponentGot {
+				err = it.numErrorf(idx, "unexpected +")
+				return
+			}
 			// Codes below not needed because this error is caught in outer logic
 			// if !floated {
 			// 	err = it.numErrorf(idx, "unexpected positive symbol")
@@ -400,7 +771,7 @@ func (it iter) parseNumber(
 			err = it.numErrorf(offset, "integer after dot missing")
 			return
 		}
-		v, err = it.parseFloatResult(offset, idx)
+		v, err = it.parseFloatResult(p, offset, idx)
 	} else {
 		if integer > 0 && it[offset] == '0' {
 			err = it.numErrorf(offset, "non-zero integer should not start with zero")
@@ -418,9 +789,9 @@ func (it iter) parseNumber(
 		}
 
 		if negative {
-			v, err = it.parseNegativeIntResult(offset, idx, integer)
+			v, err = it.parseNegativeIntResult(p, offset, idx, integer)
 		} else {
-			v, err = it.parsePositiveIntResult(offset, idx, integer)
+			v, err = it.parsePositiveIntResult(p, offset, idx, integer)
 		}
 	}
 
@@ -461,13 +832,13 @@ const (
 	intMinAbs     = 9223372036854775808
 )
 
-func (it iter) parseFloatResult(start, end int) (*V, error) {
-	f, err := strconv.ParseFloat(unsafeBtoS(it[start:end]), 64)
+func (it iter) parseFloatResult(p pool, start, end int) (*V, error) {
+	f, err := strconv.ParseFloat(unsafe.BtoS(it[start:end]), 64)
 	if err != nil {
 		return nil, it.numErrorf(start, "%w", err)
 	}
 
-	v := new(Number)
+	v := new(p, Number)
 	v.srcByte = it[start:end]
 
 	v.num.negative = f < 0
@@ -479,7 +850,7 @@ func (it iter) parseFloatResult(start, end int) (*V, error) {
 	return v, nil
 }
 
-func (it iter) parsePositiveIntResult(start, end int, integer uint64) (*V, error) {
+func (it iter) parsePositiveIntResult(p pool, start, end int, integer uint64) (*V, error) {
 	le := end - start
 
 	if le > len(uintMaxStr) {
@@ -490,7 +861,7 @@ func (it iter) parsePositiveIntResult(start, end int, integer uint64) (*V, error
 		}
 	}
 
-	v := new(Number)
+	v := new(p, Number)
 	v.srcByte = it[start:end]
 
 	v.num.negative = false
@@ -502,7 +873,7 @@ func (it iter) parsePositiveIntResult(start, end int, integer uint64) (*V, error
 	return v, nil
 }
 
-func (it iter) parseNegativeIntResult(start, end int, integer uint64) (*V, error) {
+func (it iter) parseNegativeIntResult(p pool, start, end int, integer uint64) (*V, error) {
 	le := end - start
 
 	if le > len(intMinStr) {
@@ -513,7 +884,7 @@ func (it iter) parseNegativeIntResult(start, end int, integer uint64) (*V, error
 		}
 	}
 
-	v := new(Number)
+	v := new(p, Number)
 	v.srcByte = it[start:end]
 
 	v.num.negative = true

@@ -3,20 +3,28 @@ package jsonvalue
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
+	"time"
 	"unsafe"
 )
 
-func testStructConv(t *testing.T) {
+func testImportExport(t *testing.T) {
 	cv("export to string", func() { testExportString(t) })
 	cv("export to int", func() { testExportInt(t) })
 	cv("export to float", func() { testExportFloat(t) })
 	cv("export to bool", func() { testExportBool(t) })
 	cv("misc import", func() { testImport(t) })
 	cv("test structconv.go Import", func() { testStructConv_Import(t) })
+
+	cv("test Issue 19", func() { testImportBugIssue19(t) })
+	cv("test Issue 22", func() { testImportBugIssue22(t) })
+
+	cv("test miscellaneous anonymous situations", func() { testImportMiscAnonymous(t) })
 }
 
 func testExportString(t *testing.T) {
@@ -206,6 +214,8 @@ func testStructConv_Import(t *testing.T) {
 	cv("invalid types", func() { testStructConv_Import_InvalidTypes(t) })
 	cv("general types", func() { testStructConv_Import_NormalTypes(t) })
 	cv("array and slice", func() { testStructConv_Import_ArrayAndSlice(t) })
+	cv("json.Marshaler", func() { testStructConv_Import_JSONMarshaler(t) })
+	cv("encding.TextMarshaler", func() { testStructConv_Import_TextMarshaler(t) })
 }
 
 func testStructConv_Import_RawAndBytes(t *testing.T) {
@@ -221,11 +231,11 @@ func testStructConv_Import_RawAndBytes(t *testing.T) {
 		so(err, isNil)
 		so(j.Len(), eq, 1)
 
+		t.Logf("%v", j.MustMarshalString())
+
 		got, err := j.GetString("raw", "message")
 		so(err, isNil)
 		so(got, eq, msg)
-
-		// t.Logf("%v", j)
 	})
 
 	cv("json.RawMessage error", func() {
@@ -339,6 +349,7 @@ func testStructConv_Import_InvalidTypes(t *testing.T) {
 		}
 
 		//lint:ignore SA1026 intend to do this to check error in uni-test
+		//nolint:all
 		_, err := json.Marshal(&st)
 		so(err, isErr)
 		t.Logf("expect error: %v", err)
@@ -372,6 +383,7 @@ func testStructConv_Import_InvalidTypes(t *testing.T) {
 		}
 
 		//lint:ignore SA1026 intend to do this to check error in uni-test
+		//nolint:all
 		_, err := json.Marshal(&st)
 		so(err, isErr)
 		t.Logf("expect error: %v", err)
@@ -688,7 +700,7 @@ func testStructConv_Import_ArrayAndSlice(t *testing.T) {
 		so(j.MustGet("Null").IsNull(), isTrue)
 	})
 
-	cv("stringfied value", func() {
+	cv("stringified value", func() {
 		type st struct {
 			Int  int  `json:"int,string"`
 			Bool bool `json:"bool,string"`
@@ -707,4 +719,669 @@ func testStructConv_Import_ArrayAndSlice(t *testing.T) {
 		so(v.MustGet("bool").ValueType(), eq, String)
 		so(v.MustGet("bool").Bool(), eq, s.Bool)
 	})
+}
+
+func testStructConv_Import_JSONMarshaler(t *testing.T) {
+	cv("time.Time", func() {
+		now := time.Now()
+
+		b, _ := now.MarshalText()
+		str := string(b)
+
+		t.Logf("now: %v, marshaled: %v", now, str)
+
+		v, err := Import(now)
+		so(err, isNil)
+		so(v.ValueType(), eq, String)
+		so(v.String(), eq, str)
+	})
+
+	cv("json.RawMessage", func() {
+		value := "Hello, raw message"
+		data := json.RawMessage(fmt.Sprintf(`{"message":"%s"}`, value))
+		v, err := Import(data)
+		so(err, isNil)
+		so(v, notNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("message").ValueType(), eq, String)
+		so(v.MustGet("message").String(), eq, value)
+	})
+
+	cv("legal customized json.Marshaler", func() {
+		m := &customizedJSONMarshaler{}
+		m.Bool = true
+		v, err := Import(m)
+		so(err, isNil)
+		so(v, notNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("b").ValueType(), eq, Number)
+		so(v.MustGet("b").Int(), eq, 1)
+
+		b, _ := json.Marshal(m)
+		so(v.MustMarshalString(), eq, string(b))
+
+		m.Bool = false
+		v, err = Import(m)
+		so(err, isNil)
+		so(v, notNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("b").ValueType(), eq, Number)
+		so(v.MustGet("b").Int(), eq, 0)
+
+		b, _ = json.Marshal(m)
+		so(v.MustMarshalString(), eq, string(b))
+	})
+
+	cv("error customized json.Marshaler", func() {
+		m := &customizedJSONMarshaler{}
+		m.err = errors.New("some error")
+
+		v, err := Import(m)
+		so(err, notNil)
+		so(v, notNil)
+		so(errors.Is(err, m.err), isTrue)
+
+		_, err = json.Marshal(m)
+		so(err, notNil)
+		so(errors.Is(err, m.err), isTrue)
+	})
+
+	cv("illegal customized json.Marshaler", func() {
+		m := &customizedJSONMarshaler{}
+		m.illegal = true
+
+		_, err := json.Marshal(m)
+		so(err, notNil)
+		t.Logf("should got error: '%v'", err)
+
+		v, err := Import(m)
+		so(err, notNil)
+		so(v, notNil)
+		t.Logf("should got error: '%v'", err)
+	})
+
+	cv("empty customized json.Marshaler", func() {
+		type data struct {
+			Data *customizedZeroJSONMarshaler `json:"data,omitempty"`
+		}
+		test := func(m customizedZeroJSONMarshaler, expected string) {
+			d := data{
+				Data: &m,
+			}
+			v, err := Import(d)
+			so(err, isNil)
+			so(v, notNil)
+			so(v.ValueType(), eq, Object)
+			so(v.MustMarshalString(), eq, expected)
+		}
+
+		f := float64(0)
+		test(customizedZeroJSONMarshaler{
+			Number: &f,
+		}, `{}`)
+
+		f = 1
+		test(customizedZeroJSONMarshaler{
+			Number: &f,
+		}, `{"data":1}`)
+
+		b := false
+		test(customizedZeroJSONMarshaler{
+			Boolean: &b,
+		}, `{}`)
+
+		b = true
+		test(customizedZeroJSONMarshaler{
+			Boolean: &b,
+		}, `{"data":true}`)
+
+		s := ""
+		test(customizedZeroJSONMarshaler{
+			String: &s,
+		}, `{}`)
+
+		s = "This is a string."
+		test(customizedZeroJSONMarshaler{
+			String: &s,
+		}, `{"data":"This is a string."}`)
+
+		test(customizedZeroJSONMarshaler{
+			Null: true,
+		}, `{}`)
+
+		test(customizedZeroJSONMarshaler{
+			Array: &([]int{}),
+		}, `{}`)
+
+		test(customizedZeroJSONMarshaler{
+			Array: &([]int{4, 3, 2, 1}),
+		}, `{"data":[4,3,2,1]}`)
+
+		test(customizedZeroJSONMarshaler{
+			Object: &(map[string]string{}),
+		}, `{}`)
+
+		test(customizedZeroJSONMarshaler{
+			Object: &(map[string]string{"some_key": "some_value"}),
+		}, `{"data":{"some_key":"some_value"}}`)
+	})
+}
+
+type customizedJSONMarshaler struct {
+	Bool    bool
+	err     error
+	illegal bool
+}
+
+func (m *customizedJSONMarshaler) MarshalJSON() ([]byte, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.illegal {
+		return []byte(`{"b":1+1}`), nil // This is an illegal JSON string.
+	}
+	const yes = `{"b":1}`
+	const no = `{"b":0}`
+	if m.Bool {
+		return []byte(yes), nil
+	}
+	return []byte(no), nil
+}
+
+type customizedZeroJSONMarshaler struct {
+	Number  *float64
+	Boolean *bool
+	String  *string
+	Null    bool
+	Array   *[]int
+	Object  *map[string]string
+}
+
+func (m *customizedZeroJSONMarshaler) MarshalJSON() (b []byte, _ error) {
+	res := `""`
+	defer func() {
+		b = []byte(res)
+	}()
+	if m.Number != nil {
+		res = strconv.FormatFloat(*m.Number, 'f', -1, 64)
+		return
+	}
+	if m.Boolean != nil {
+		res = fmt.Sprintf("%v", *m.Boolean)
+		return
+	}
+	if m.String != nil {
+		res = NewString(*m.String).MustMarshalString()
+		return
+	}
+	if m.Null {
+		res = "null"
+		return
+	}
+	if m.Array != nil {
+		res = New(*m.Array).MustMarshalString()
+		return
+	}
+	if m.Object != nil {
+		res = New(*m.Object).MustMarshalString()
+		return
+	}
+	return
+}
+
+func testStructConv_Import_TextMarshaler(t *testing.T) {
+	cv("legal customized encoding.TextMarshaler", func() {
+		m := &customizedTextMarshaler{}
+		m.str = "Hello, text!"
+		v, err := Import(m)
+		so(err, isNil)
+		so(v, notNil)
+		so(v.ValueType(), eq, String)
+		so(v.String(), eq, m.str)
+		so(v.MustMarshalString(), eq, fmt.Sprintf(`"%s"`, m.str))
+
+		b, _ := json.Marshal(m)
+		so(v.MustMarshalString(), eq, string(b))
+	})
+
+	cv("error customized encoding.TextMarshaler", func() {
+		m := &customizedTextMarshaler{}
+		m.err = errors.New("some error")
+
+		v, err := Import(m)
+		so(err, notNil)
+		so(v, notNil)
+		so(errors.Is(err, m.err), isTrue)
+
+		_, err = json.Marshal(m)
+		so(err, notNil)
+		so(errors.Is(err, m.err), isTrue)
+	})
+
+	cv("empty customized encoding.TextMarshaler", func() {
+		type data struct {
+			Data customizedTextMarshaler `json:"data,omitempty"`
+		}
+		d := data{}
+		d.Data.str = "Hello, world!"
+
+		v, err := Import(d)
+		so(err, isNil)
+		so(v, notNil)
+		so(v.ValueType(), eq, Object)
+		so(v.Len(), eq, 1)
+		so(v.MustGet("data").ValueType(), eq, String)
+
+		so(v.MustMarshalString(), eq, fmt.Sprintf(`{"data":"%s"}`, d.Data.str))
+
+		d.Data.str = ""
+		v, err = Import(d)
+		so(err, isNil)
+		so(v, notNil)
+		so(v.ValueType(), eq, Object)
+		so(v.Len(), eq, 0)
+		so(v.MustMarshalString(), eq, "{}")
+	})
+	// TODO:
+}
+
+type customizedTextMarshaler struct {
+	str string
+	err error
+}
+
+func (m *customizedTextMarshaler) MarshalText() ([]byte, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return []byte(m.str), nil
+}
+
+func testImportBugIssue19(t *testing.T) {
+	type req struct {
+		IDs []uint64 `json:"ids,omitempty"`
+	}
+	type data struct {
+		Req *req `json:"req,omitempty"`
+	}
+
+	d := data{}
+	d.Req = &req{}
+	d.Req.IDs = []uint64{0}
+
+	j, err := Import(d)
+	so(err, isNil)
+
+	s := j.MustMarshalString()
+	so(s, eq, `{"req":{"ids":[0]}}`)
+}
+
+func testImportBugIssue22(t *testing.T) {
+	type inner struct {
+		Name string
+	}
+	type outer struct {
+		*inner
+		Age int
+	}
+	person := &outer{}
+	person.inner = &inner{}
+	person.Name = "Andrew"
+
+	b, _ := json.Marshal(person)
+	t.Logf("encoding/json: %s", b)
+
+	s := New(person).MustMarshalString(OptSetSequence())
+	so(s, eq, string(b))
+}
+
+func testImportMiscAnonymous(t *testing.T) {
+	cv("struct pointer", func() { testImportMiscAnonymousStructPtrInStruct(t) })
+	cv("empty struct pointer", func() { testImportMiscEmptyAnonymousStructPtrInStruct(t) })
+	cv("exportable basic types", func() { testImportMiscAnonymousExportableBasicTypeInStruct(t) })
+	cv("exportable basic types with tags", func() { testImportMiscAnonymousExportableBasicTypeInStructWithTags(t) })
+	cv("un-exportable basic types", func() { testImportMiscAnonymousPrivateBasicTypeInStruct(t) })
+	cv("slice", func() { testImportMiscAnonymousSliceInStruct(t) })
+	cv("array", func() { testImportMiscAnonymousArrayInStruct(t) })
+	cv("slice pointer", func() { testImportMiscAnonymousSlicePtrInStruct(t) })
+	cv("invalid types", func() { testImportMiscAnonymousInvalidTypes(t) })
+	cv("misc marshaler types", func() { testImportExportMiscMarshalerTypes(t) })
+}
+
+func testImportMiscAnonymousStructPtrInStruct(t *testing.T) {
+	type inner struct {
+		Name string
+	}
+	type outer struct {
+		*inner
+		Age int
+	}
+
+	person := &outer{}
+	person.inner = &inner{}
+	person.Name = "Andrew"
+	person.Age = 20
+
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":"Andrew","Age":20}`)
+}
+
+func testImportMiscEmptyAnonymousStructPtrInStruct(t *testing.T) {
+	type inner struct {
+		Name string
+	}
+	type outer struct {
+		*inner
+		Age int
+	}
+
+	person := &outer{}
+	person.Age = 20
+
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString()
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Age":20}`)
+}
+
+func testImportMiscAnonymousExportableBasicTypeInStruct(t *testing.T) {
+	type Name string
+	type Age int
+	type Gender string
+
+	type outer struct {
+		Name
+		Age
+		Gender `json:"-"`
+	}
+
+	person := &outer{}
+	person.Name = "Andrew"
+	person.Age = 20
+	person.Gender = "male"
+
+	//lint:ignore SA9005 because the lint is error
+	//nolint:all
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":"Andrew","Age":20}`)
+}
+
+func testImportMiscAnonymousExportableBasicTypeInStructWithTags(t *testing.T) {
+	type Name string
+	type Age int
+
+	type outer struct {
+		Name `json:"n"`
+		Age  `json:"a"`
+	}
+
+	person := &outer{}
+	person.Name = "Andrew"
+	person.Age = 20
+
+	//lint:ignore SA9005 because the lint is error
+	//nolint:all
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"n":"Andrew","a":20}`)
+}
+
+func testImportMiscAnonymousPrivateBasicTypeInStruct(t *testing.T) {
+	type name string
+
+	type outer struct {
+		name `json:"n"`
+		Age  float64 `json:"a"`
+	}
+
+	person := &outer{}
+	person.name = "Andrew"
+	person.Age = 20
+
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"a":20}`)
+}
+
+func testImportMiscAnonymousSliceInStruct(t *testing.T) {
+	type Name []string
+	type nickname []string
+
+	type outer struct {
+		Name
+		nickname
+		Age int
+	}
+
+	person := &outer{}
+	person.Name = []string{"Andrew", "M", "C"}
+	person.Age = 20
+
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":["Andrew","M","C"],"Age":20}`)
+
+	person.nickname = nickname{"AMC"}
+
+	b, _ = json.Marshal(person)
+	v, err = Import(person)
+	s = v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":["Andrew","M","C"],"Age":20}`)
+}
+
+func testImportMiscAnonymousArrayInStruct(t *testing.T) {
+	type Name [3]string
+
+	type outer struct {
+		Name
+		Age int
+	}
+
+	person := &outer{}
+	person.Name[0] = "Andrew"
+	person.Name[1] = "C"
+	person.Age = 20
+
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":["Andrew","C",""],"Age":20}`)
+}
+
+func testImportMiscAnonymousSlicePtrInStruct(t *testing.T) {
+	type Name []string
+
+	type outer struct {
+		*Name
+
+		Age int
+	}
+
+	person := &outer{}
+	person.Age = 20
+
+	b, _ := json.Marshal(person)
+	v, err := Import(person)
+	s := v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":null,"Age":20}`)
+
+	n := Name{"Andrew", "M", "C"}
+	person.Name = &n
+
+	b, _ = json.Marshal(person)
+	v, err = Import(person)
+	s = v.MustMarshalString(OptSetSequence())
+
+	so(err, isNil)
+	so(s, eq, string(b))
+	so(s, eq, `{"Name":["Andrew","M","C"],"Age":20}`)
+}
+
+func testImportMiscAnonymousInvalidTypes(t *testing.T) {
+	type Inner chan int
+	type outer struct {
+		Inner
+		Age int
+	}
+
+	data := &outer{}
+	//lint:ignore SA1026 intent to test this
+	//nolint:all
+	_, err := json.Marshal(data)
+	so(err, isErr)
+
+	_, err = Import(data)
+	so(err, isErr)
+}
+
+func testImportExportMiscMarshalerTypes(t *testing.T) {
+	cv("json.Marshaler, ptr", func() {
+		r := &refJSONMarshaler{}
+		r.s = "json.Marshaler"
+		v, err := Import(r)
+		so(err, isNil)
+		so(v.ValueType(), eq, String)
+		so(v.MustMarshalString(), eq, `"json.Marshaler"`)
+	})
+
+	cv("encoding.TextMarshaler, ptr", func() {
+		r := &refTextMarshaler{}
+		r.s = "encoding.TextMarshaler"
+		v, err := Import(r)
+		so(err, isNil)
+		so(v.ValueType(), eq, String)
+		so(v.MustMarshalString(), eq, `"encoding.TextMarshaler"`)
+	})
+
+	cv("json.Marshaler, ptr to ptr", func() {
+		r := &refJSONMarshaler{}
+		r.s = "json.Marshaler"
+		v, err := Import(&r)
+		so(err, isNil)
+		so(v.ValueType(), eq, String)
+		so(v.MustMarshalString(), eq, `"json.Marshaler"`)
+	})
+
+	cv("encoding.TextMarshaler, ptr to ptr", func() {
+		r := &refTextMarshaler{}
+		r.s = "encoding.TextMarshaler"
+		v, err := Import(&r)
+		so(err, isNil)
+		so(v.ValueType(), eq, String)
+		so(v.MustMarshalString(), eq, `"encoding.TextMarshaler"`)
+	})
+
+	cv("json.Marshaler, value", func() {
+		st := struct {
+			V *valueJSONMarshaler `json:"v"`
+		}{}
+		value := valueJSONMarshaler{1, 2, 3, 4, 0xa, 0xb, 0xc, 0xd}
+		st.V = &value
+		v, err := Import(st)
+		so(err, isNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("v").ValueType(), eq, String)
+		so(v.MustMarshalString(), eq, `{"v":"010203040a0b0c0d"}`)
+	})
+
+	cv("encoding.TextMarshaler, value", func() {
+		st := struct {
+			V *valueTextMarshaler `json:"v"`
+		}{}
+		value := valueTextMarshaler{1, 2, 3, 4, 0xa, 0xb, 0xc, 0xd}
+		st.V = &value
+		v, err := Import(st)
+		so(err, isNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("v").ValueType(), eq, String)
+		so(v.MustMarshalString(), eq, `{"v":"010203040a0b0c0d"}`)
+	})
+
+	cv("json.Marshaler, nil", func() {
+		st := struct {
+			V *valueJSONMarshaler `json:"v,omitempty"`
+		}{}
+		v, err := Import(st)
+		so(err, isNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("v").ValueType(), eq, NotExist)
+		so(v.MustMarshalString(), eq, `{}`)
+	})
+
+	cv("encoding.TextMarshaler, nil", func() {
+		st := struct {
+			V *valueTextMarshaler `json:"v,omitempty"`
+		}{}
+		v, err := Import(st)
+		so(err, isNil)
+		so(v.ValueType(), eq, Object)
+		so(v.MustGet("v").ValueType(), eq, NotExist)
+		so(v.MustMarshalString(), eq, `{}`)
+	})
+}
+
+type valueJSONMarshaler [8]byte
+
+func (v valueJSONMarshaler) MarshalJSON() ([]byte, error) {
+	s := hex.EncodeToString(v[:])
+	s = fmt.Sprintf(`"%s"`, s)
+	return []byte(s), nil
+}
+
+type valueTextMarshaler [8]byte
+
+func (v valueTextMarshaler) MarshalText() ([]byte, error) {
+	s := hex.EncodeToString(v[:])
+	return []byte(s), nil
+}
+
+type refJSONMarshaler struct {
+	s string
+}
+
+func (r *refJSONMarshaler) MarshalJSON() ([]byte, error) {
+	v := NewString(r.s)
+	return v.Marshal()
+}
+
+type refTextMarshaler struct {
+	s string
+}
+
+func (r *refTextMarshaler) MarshalText() ([]byte, error) {
+	return []byte(r.s), nil
 }
